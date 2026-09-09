@@ -38,27 +38,43 @@ async def save_feed(name, result):
 
 async def ticker_map():
     headers={"User-Agent":settings.sec_user_agent,"Accept-Encoding":"gzip, deflate"}
-    async with httpx.AsyncClient(timeout=30) as c:
-        r=await c.get("https://www.sec.gov/files/company_tickers.json",headers=headers)
-        r.raise_for_status(); data=r.json()
-    allmap={str(v["ticker"]).upper():v.get("title") for v in data.values()}
-    tracked={t:allmap.get(t) for t in BASELINE if t in allmap}
+    allmap={}
+    try:
+        async with httpx.AsyncClient(timeout=30) as c:
+            r=await c.get("https://www.sec.gov/files/company_tickers.json",headers=headers)
+            r.raise_for_status(); data=r.json()
+        allmap={str(v["ticker"]).upper():v.get("title") for v in data.values()}
+    except Exception:
+        # SEC universe lookup must not prevent other feeds from syncing.
+        pass
+    tracked={t:allmap.get(t) for t in BASELINE}
     docs=await db.news.find({"feed":"market_news","ticker":{"$ne":None}}, {"ticker":1,"company":1}).limit(2000).to_list(2000)
     for d in docs:
         if d.get("ticker"): tracked[d["ticker"].upper()]=d.get("company") or allmap.get(d["ticker"].upper())
-    return tracked
+    return {t:c for t,c in tracked.items() if t}
 
 async def sync_all():
     tracked=await ticker_map()
     async with httpx.AsyncClient(timeout=30, follow_redirects=True) as c:
-        feeds=[
-            ("market_news", GdeltNewsFeed("market_news", settings.market_domains.split(',')), {"tickers":tracked}),
-            ("insiders", SecInsidersFeed(c), {"tickers":tracked}),
-            ("congress", HouseCongressFeed(c), {}),
-            ("egypt_news", GdeltNewsFeed("egypt_news", settings.egypt_domains.split(','), egypt=True), {"tickers":{}}),
-        ]
-        results=await asyncio.gather(*[feed.fetch(**kwargs) for _,feed,kwargs in feeds], return_exceptions=True)
-    for (name,_,_), result in zip(feeds,results):
+        market_feed = GdeltNewsFeed("market_news", settings.market_domains.split(','))
+        insider_feed = SecInsidersFeed(c)
+        congress_feed = HouseCongressFeed(c)
+        egypt_feed = GdeltNewsFeed("egypt_news", settings.egypt_domains.split(','), egypt=True)
+        # GDELT is shared by the market and Egypt feeds. Run them sequentially
+        # so the host limiter is effective even during a full refresh.
+        results=[]
+        for feed, kwargs in [
+            (market_feed, {"tickers":tracked}),
+            (insider_feed, {"tickers":tracked}),
+            (congress_feed, {}),
+            (egypt_feed, {"tickers":{}}),
+        ]:
+            try:
+                results.append(await feed.fetch(**kwargs))
+            except Exception as exc:
+                class R: items=[]; error=str(exc)
+                results.append(R())
+    for name, result in zip(("market_news", "insiders", "congress", "egypt_news"), results):
         if isinstance(result,Exception):
             class R: items=[]; error=str(result)
             result=R()

@@ -1,11 +1,16 @@
+import asyncio
 import hashlib
+import random
 import re
 from urllib.parse import urlparse
+from email.utils import parsedate_to_datetime
 import httpx
 from .base import Feed, FeedResult
+from .limiter import gdelt_limiter
 from ..services.relevance import MARKET_ALLOWED, EGYPT_ALLOWED, host_allowed, market_subject_ok, egypt_subject_ok
 from ..services.dates import parse_date
 
+GDELT_URL = "https://api.gdeltproject.org/api/v2/doc/doc"
 
 def classify(text: str) -> str:
     t = text.lower()
@@ -15,6 +20,42 @@ def classify(text: str) -> str:
     s = sum(1 for x in bearish if x in t)
     return "bullish" if b > s else "bearish" if s > b else "neutral"
 
+
+async def gdelt_get(client: httpx.AsyncClient, params: dict, attempts: int = 4) -> httpx.Response:
+    last_error = None
+    for attempt in range(attempts):
+        await gdelt_limiter.wait("api.gdeltproject.org")
+        try:
+            response = await client.get(GDELT_URL, params=params)
+        except httpx.HTTPError as exc:
+            last_error = exc
+            if attempt == attempts - 1:
+                raise
+            await asyncio.sleep(min(60.0, 2.0 ** attempt + random.random()))
+            continue
+        if response.status_code != 429:
+            response.raise_for_status()
+            return response
+        retry_after = response.headers.get("Retry-After")
+        delay = None
+        if retry_after:
+            try:
+                delay = max(0.0, float(retry_after))
+            except ValueError:
+                try:
+                    delay = max(0.0, (parsedate_to_datetime(retry_after) - __import__('datetime').datetime.now(parsedate_to_datetime(retry_after).tzinfo)).total_seconds())
+                except Exception:
+                    delay = None
+        if delay is None:
+            delay = min(60.0, 10.0 * (2 ** attempt)) + random.uniform(0, 2)
+        if attempt == attempts - 1:
+            response.raise_for_status()
+        await asyncio.sleep(delay)
+    if last_error:
+        raise last_error
+    raise RuntimeError("GDELT request failed without a response")
+
+
 class GdeltNewsFeed(Feed):
     def __init__(self, name: str, domains: list[str], egypt: bool = False):
         self.name, self.domains, self.egypt = name, domains, egypt
@@ -23,17 +64,16 @@ class GdeltNewsFeed(Feed):
         allowed = EGYPT_ALLOWED if self.egypt else MARKET_ALLOWED
         items, errors = [], []
         tickers = tickers or {}
-        domain_query = " OR ".join(f"domainis:{d}" for d in self.domains)
+        domain_query = " OR ".join(f"domainis:{d.strip()}" for d in self.domains if d.strip())
         query = f"({domain_query})"
         if self.egypt:
             query += " (Egypt OR EGX OR مصر OR البورصة)"
         else:
-            # Search market terms, while the second-stage relevance gate remains authoritative.
             query += ' (earnings OR guidance OR stocks OR shares OR market OR rates OR tariff OR sector OR index)'
+        params = {"query": query, "mode": "artlist", "maxrecords": 250, "format": "json", "sort": "datedesc", "timespan": "24h"}
         try:
             async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-                r = await client.get("https://api.gdeltproject.org/api/v2/doc/doc", params={"query": query, "mode": "artlist", "maxrecords": 250, "format": "json", "sort": "datedesc", "timespan": "24h"})
-                r.raise_for_status()
+                r = await gdelt_get(client, params)
                 payload = r.json()
             for e in payload.get("articles", []):
                 link = e.get("url", "")
@@ -52,7 +92,7 @@ class GdeltNewsFeed(Feed):
             unique = {x["id"]: x for x in items}
             return FeedResult(list(unique.values()))
         except Exception as exc:
-            return FeedResult([], str(exc))
+            return FeedResult([], f"GDELT: {exc}")
 
     @staticmethod
     def _match_ticker(title: str, tickers: dict[str, str]):
