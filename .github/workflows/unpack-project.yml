@@ -22,7 +22,7 @@ jobs:
           rm -rf /tmp/money-project
           mkdir -p /tmp/money-project
           unzip -q money-that-matters-full.zip -d /tmp/money-project
-          cp -R /tmp/money-project/money-that-matters-full/. .
+          cp -R /tmp/money-project/. .
           rm -f money-that-matters-full.zip
 
       - name: Commit project files
