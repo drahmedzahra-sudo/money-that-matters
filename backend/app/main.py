@@ -11,6 +11,7 @@ from .feeds.news import GdeltNewsFeed
 from .feeds.sec import SecInsidersFeed
 from .feeds.house import HouseCongressFeed
 from .services.scoring import Signal, money_match, direction
+from .services.dates import utc_age
 from .models import MoneyMatch
 
 client = AsyncIOMotorClient(settings.mongodb_url)
@@ -99,8 +100,9 @@ app.add_middleware(CORSMiddleware,allow_origins=[settings.frontend_origin],allow
 async def feed_status(name):
     doc=await db.feed_state.find_one({"_id":name})
     if not doc or not doc.get("updated_at"): return {"name":name,"mode":"empty","updated_at":None,"error":doc.get("error") if doc else None}
-    age=datetime.now(timezone.utc)-doc["updated_at"]
-    return {"name":name,"mode":"live" if age<=timedelta(hours=24) else "stale","updated_at":doc["updated_at"].isoformat(),"error":doc.get("error"),"count":doc.get("count",0)}
+    updated_at=doc["updated_at"]
+    age=utc_age(updated_at)
+    return {"name":name,"mode":"live" if age<=timedelta(hours=24) else "stale","updated_at":updated_at.isoformat(),"error":doc.get("error"),"count":doc.get("count",0)}
 
 async def status(): return {"feeds":[await feed_status(n) for n in ("market_news","insiders","congress","egypt_news")]}
 
