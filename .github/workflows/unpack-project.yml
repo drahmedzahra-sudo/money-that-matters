@@ -4,6 +4,7 @@ on:
   push:
     paths:
       - "money-that-matters-full.zip"
+  workflow_dispatch:
 
 permissions:
   contents: write
