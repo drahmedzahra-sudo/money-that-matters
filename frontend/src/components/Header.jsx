@@ -1,0 +1,2 @@
+import {RefreshCw} from 'lucide-react'
+export default function Header({refreshing,onRefresh}){return <header className="sticky top-0 z-20 flex items-center justify-between border-b border-slate-200 bg-white/95 px-4 py-3 backdrop-blur"><div className="font-semibold tracking-tight">Money that matters</div><button aria-label="Refresh" onClick={onRefresh} disabled={refreshing} className="grid h-10 w-10 place-items-center rounded-full border border-slate-200 bg-white shadow-sm"><RefreshCw size={18} className={refreshing?'animate-spin':''}/></button></header>}

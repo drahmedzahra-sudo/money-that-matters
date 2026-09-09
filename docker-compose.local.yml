@@ -1,0 +1,10 @@
+services:
+  mongodb:
+    image: mongo:8
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - money_that_matters_mongo:/data/db
+volumes:
+  money_that_matters_mongo:

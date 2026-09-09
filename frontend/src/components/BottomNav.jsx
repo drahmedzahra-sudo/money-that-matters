@@ -1,0 +1,3 @@
+import {WalletCards,Newspaper,UserRound,Landmark,Globe2,Star} from 'lucide-react'
+const tabs=[['match','Money Match',WalletCards],['news','News',Newspaper],['insiders','Insiders',UserRound],['congress','Congress',Landmark],['egypt','Egypt',Globe2],['watchlist','Watchlist',Star]]
+export default function BottomNav({tab,setTab}){return <nav className="fixed bottom-0 left-0 right-0 z-30 border-t border-slate-200 bg-white"><div className="mx-auto grid max-w-xl grid-cols-6">{tabs.map(([id,label,Icon])=><button key={id} onClick={()=>setTab(id)} className={`min-h-16 px-1 py-2 text-[10px] ${tab===id?'text-sky-400':'text-slate-500'}`}><Icon size={18} className="mx-auto mb-1"/><span>{label}</span></button>)}</div></nav>}

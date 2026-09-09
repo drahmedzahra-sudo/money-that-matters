@@ -1,0 +1,1 @@
+export default function Footer(){return <div className="px-4 pb-24 pt-4 text-center text-[10px] leading-4 text-slate-500">Public-filings data. Not financial advice. Congressional trades are disclosed on a legal delay.</div>}
