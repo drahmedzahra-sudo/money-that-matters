@@ -1,0 +1,33 @@
+name: Unpack project
+
+on:
+  push:
+    paths:
+      - "money-that-matters-full.zip"
+
+permissions:
+  contents: write
+
+jobs:
+  unpack:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Unpack project
+        run: |
+          rm -rf /tmp/money-project
+          mkdir -p /tmp/money-project
+          unzip -q money-that-matters-full.zip -d /tmp/money-project
+          cp -R /tmp/money-project/money-that-matters-full/. .
+          rm -f money-that-matters-full.zip
+
+      - name: Commit project files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .
+          git commit -m "Unpack Money that matters project" || exit 0
+          git push
