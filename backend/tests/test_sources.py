@@ -14,3 +14,14 @@ def test_egypt_relevance():
     assert egypt_subject_ok('Egypt stocks rally')
     assert egypt_subject_ok('البورصة المصرية ترتفع',native=True)
     assert not egypt_subject_ok('International football results',native=False)
+
+
+def test_egypt_official_egx_feed_is_present():
+    from app.feeds.news import EgyptEGXFeed
+    assert EgyptEGXFeed.URL.startswith("https://beta.egx.com.eg/")
+
+def test_egypt_uses_official_egx_source_in_sync():
+    from pathlib import Path
+    main=(Path(__file__).parents[1]/"app"/"main.py").read_text()
+    assert "EgyptEGXFeed" in main
+    assert "official-egx-plus-ahram-plus-gdelt" in main

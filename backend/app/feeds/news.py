@@ -146,6 +146,73 @@ class MarketDirectFeed(Feed):
             if re.search(rf"(?<![A-Za-z0-9]){re.escape(ticker.lower())}(?![A-Za-z0-9])",low) or (company and company.lower() in low): return ticker,company
         return None,None
 
+class EgyptEGXFeed(Feed):
+    """Official Egyptian Exchange disclosures/news from the public EGX homepage."""
+    URL = "https://beta.egx.com.eg/en"
+    def __init__(self, name="egypt_news"): self.name=name
+
+    @staticmethod
+    def _published_from_context(text):
+        # EGX displays month/day on the live homepage. The page itself is the
+        # current-year source, so attaching the current UTC year is defensible.
+        m=re.search(r"\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+(\d{1,2})\b", text, re.I)
+        if not m: return None
+        try:
+            year=dtmod.datetime.now(dtmod.timezone.utc).year
+            return dtmod.datetime.strptime(f"{m.group(1)} {m.group(2)} {year}", "%b %d %Y").replace(tzinfo=dtmod.timezone.utc).isoformat()
+        except Exception: return None
+
+    async def fetch(self, tickers=None):
+        import bs4
+        items=[]
+        headers={"User-Agent":"Money that matters/1.0"}
+        try:
+            async with httpx.AsyncClient(timeout=25, follow_redirects=True, headers=headers) as client:
+                r=await client.get(self.URL); r.raise_for_status()
+            soup=bs4.BeautifulSoup(r.text,"html.parser")
+            seen=set()
+            for a in soup.find_all("a", href=True):
+                href=a.get("href","")
+                if not re.search(r"/news/\d+", href, re.I): continue
+                title=" ".join(a.get_text(" ",strip=True).split())
+                if len(title)<15 or title in seen: continue
+                link=str(httpx.URL(self.URL).join(href))
+                if not host_allowed(link,{"beta.egx.com.eg","egx.com.eg"}): continue
+                context=""
+                node=a
+                for _ in range(4):
+                    node=getattr(node,"parent",None)
+                    if not node: break
+                    candidate=" ".join(node.get_text(" ",strip=True).split())
+                    if self._published_from_context(candidate):
+                        context=candidate
+                        break
+                if not context:
+                    context=" ".join(a.get_text(" ",strip=True).split())
+                published=self._published_from_context(context)
+                if not published: continue
+                code_match=re.search(r"\b([A-Z0-9]{2,8}\.CA)\b", context)
+                ticker=code_match.group(1) if code_match else None
+                company=None
+                if code_match:
+                    before=context[:code_match.start()].strip(" -–—")
+                    if before and len(before)<160: company=before
+                items.append({
+                    "id":hashlib.sha256(link.encode()).hexdigest()[:20],
+                    "ticker":ticker,
+                    "company":company,
+                    "headline":title,
+                    "outlet":"egx.com.eg",
+                    "published_at":published,
+                    "source_url":link,
+                    "lean":classify(title),
+                })
+                seen.add(title)
+                if len(items)>=40: break
+            return FeedResult(list({x["id"]:x for x in items}.values())) if items else FeedResult([],"EGX returned no verified news records")
+        except Exception as exc:
+            return FeedResult([],f"EGX: {exc}")
+
 class EgyptDirectFeed(Feed):
     """Direct, read-only Egypt business/news pages used when GDELT is unavailable."""
     URLS = [

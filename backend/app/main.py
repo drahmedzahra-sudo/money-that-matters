@@ -7,7 +7,7 @@ from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from .config import settings
-from .feeds.news import GdeltNewsFeed, MarketDirectFeed, EgyptDirectFeed
+from .feeds.news import GdeltNewsFeed, MarketDirectFeed, EgyptDirectFeed, EgyptEGXFeed
 from .feeds.sec import SecInsidersFeed, STATIC_CIKS
 from .feeds.house import HouseCongressFeed
 from .feeds.limiter import house_limiter, sec_limiter
@@ -18,7 +18,7 @@ from .models import MoneyMatch
 client = AsyncIOMotorClient(settings.mongodb_url)
 db = client[settings.mongodb_db]
 
-BUILD_VERSION = "v12-sec-fast-fail-runtime"
+BUILD_VERSION = "v13-egypt-market-first-runtime"
 BASELINE = [x.strip().upper() for x in settings.baseline_tickers.split(',') if x.strip()]
 sync_lock = asyncio.Lock()
 
@@ -82,6 +82,7 @@ async def _sync_all_locked():
         congress_feed = HouseCongressFeed(c)
         egypt_feed = GdeltNewsFeed("egypt_news", settings.egypt_domains.split(','), egypt=True)
         egypt_direct = EgyptDirectFeed()
+        egypt_egx = EgyptEGXFeed()
         market_direct = MarketDirectFeed()
 
         async def market():
@@ -92,11 +93,23 @@ async def _sync_all_locked():
             return fallback if fallback.items else direct if direct.error else fallback
 
         async def egypt():
-            direct = await _safe_fetch("Egypt direct", egypt_direct.fetch(), 45)
-            if direct.items:
-                return direct
-            fallback = await _safe_fetch("GDELT", egypt_feed.fetch({}), 45)
-            return fallback if fallback.items else direct if direct.error else fallback
+            # Egypt is a first-class market feed: combine official EGX
+            # disclosures with independent Egypt business news. GDELT is only
+            # an additional index source, never a replacement for EGX.
+            egx, direct, fallback = await asyncio.gather(
+                _safe_fetch("EGX", egypt_egx.fetch(), 35),
+                _safe_fetch("Egypt direct", egypt_direct.fetch(), 35),
+                _safe_fetch("GDELT", egypt_feed.fetch({}), 35),
+            )
+            merged={}
+            for result in (egx, direct, fallback):
+                for item in result.items:
+                    merged[item["id"]]=item
+            if merged:
+                errors=[x.error for x in (egx,direct,fallback) if x.error]
+                return FeedResult(list(merged.values()), "; ".join(errors) if errors else None)
+            errors=[x.error for x in (egx,direct,fallback) if x.error]
+            return FeedResult([], "; ".join(errors) if errors else "Egypt sources returned no verified records")
 
         market_result, insider_result, congress_result, egypt_result = await asyncio.gather(
             market(),
@@ -146,7 +159,7 @@ async def build_manifest():
             "sec": "static-cik-universe",
             "house": "txt-first-xml-fallback",
             "market": "direct-cnbc-first-gdelt-fallback",
-            "egypt": "direct-ahram-first-gdelt-fallback",
+            "egypt": "official-egx-plus-ahram-plus-gdelt",
         },
     }
 
