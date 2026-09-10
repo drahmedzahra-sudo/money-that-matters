@@ -1,7 +1,14 @@
 import asyncio
 import time
 
+
 class HostLimiter:
+    """Shared per-host minimum-interval limiter.
+
+    Locks are created lazily inside the running event loop, so importing this
+    module does not bind asyncio primitives to the wrong loop.
+    """
+
     def __init__(self, min_interval: float):
         self.min_interval = max(0.0, float(min_interval))
         self._locks = {}
@@ -19,6 +26,5 @@ class HostLimiter:
                 await asyncio.sleep(delay)
             self._last[host] = time.monotonic()
 
+
 gdelt_limiter = HostLimiter(5.0)
-sec_limiter = HostLimiter(1.2)
-house_limiter = HostLimiter(1.0)
