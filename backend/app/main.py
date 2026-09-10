@@ -3,12 +3,12 @@ from datetime import datetime, timezone, timedelta
 from contextlib import asynccontextmanager
 from urllib.parse import urlparse
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from .config import settings
 from .feeds.news import GdeltNewsFeed, MarketDirectFeed, EgyptDirectFeed
-from .feeds.sec import SecInsidersFeed
+from .feeds.sec import SecInsidersFeed, STATIC_CIKS
 from .feeds.house import HouseCongressFeed
 from .feeds.limiter import house_limiter, sec_limiter
 from .services.scoring import Signal, money_match, direction
@@ -18,7 +18,7 @@ from .models import MoneyMatch
 client = AsyncIOMotorClient(settings.mongodb_url)
 db = client[settings.mongodb_db]
 
-BUILD_VERSION = "v5-sec-house-runtime"
+BUILD_VERSION = "v6-rate-limit-direct-first"
 BASELINE = [x.strip().upper() for x in settings.baseline_tickers.split(',') if x.strip()]
 sync_lock = asyncio.Lock()
 
@@ -43,15 +43,14 @@ async def save_feed(name, result):
         await db.feed_state.insert_one({"_id":name,"updated_at":None,"error":result.error,"count":0})
 
 async def ticker_map():
-    headers={"User-Agent":settings.sec_user_agent,"Accept-Encoding":"gzip, deflate"}
-    allmap={}
+    # Do not make SEC company_tickers.json a prerequisite for refreshes.
+    # Use the static CIK universe plus any cached SEC metadata.
+    allmap={t:t for t in STATIC_CIKS}
     try:
-        async with httpx.AsyncClient(timeout=30) as c:
-            r=await c.get("https://www.sec.gov/files/company_tickers.json",headers=headers)
-            r.raise_for_status(); data=r.json()
-        allmap={str(v["ticker"]).upper():v.get("title") for v in data.values()}
+        cached=await db.sec_cache.find_one({"_id":"company_tickers"})
+        for ticker,meta in ((cached or {}).get("data") or {}).items():
+            allmap[str(ticker).upper()]=meta.get("title") if isinstance(meta,dict) else meta
     except Exception:
-        # SEC universe lookup must not prevent other feeds from syncing.
         pass
     tracked={t:allmap.get(t) for t in BASELINE}
     docs=await db.news.find({"feed":"market_news","ticker":{"$ne":None}}, {"ticker":1,"company":1}).limit(2000).to_list(2000)
@@ -74,49 +73,42 @@ async def _sync_all_locked():
         egypt_feed = GdeltNewsFeed("egypt_news", settings.egypt_domains.split(','), egypt=True)
         egypt_direct = EgyptDirectFeed()
         market_direct = MarketDirectFeed()
-        # GDELT is shared by the market and Egypt feeds. Run them sequentially
-        # so the host limiter is effective even during a full refresh.
-        results=[]
-        for feed, kwargs in [
-            (market_feed, {"tickers":tracked}),
-            (insider_feed, {"tickers":tracked}),
-            (congress_feed, {}),
-            (egypt_feed, {"tickers":{}}),
-        ]:
-            try:
-                results.append(await feed.fetch(**kwargs))
-            except Exception as exc:
-                class R: items=[]; error=str(exc)
-                results.append(R())
-    # Keep market news operational when GDELT is rate-limited: use an allow-listed publisher RSS fallback.
-    if results[0].error or not results[0].items:
-        try:
-            direct_market = await market_direct.fetch(tracked)
-            if direct_market.items or not direct_market.error:
-                results[0] = direct_market
-        except Exception:
-            pass
 
-    # Egypt is intentionally independent from Money Match. Prefer the direct
-    # allow-listed publisher first; use compact-query GDELT only as discovery fallback.
-    try:
-        direct = await egypt_direct.fetch()
-        if direct.items:
-            results[3] = direct
-    except Exception:
-        pass
-    if not results[3].items:
+        # Direct allow-listed publisher feeds are primary. GDELT is only a
+        # discovery fallback and can never overwrite a successful direct feed.
         try:
-            fallback = await egypt_feed.fetch({})
-            if fallback.items:
-                results[3] = fallback
-        except Exception:
-            pass
-    for name, result in zip(("market_news", "insiders", "congress", "egypt_news"), results):
-        if isinstance(result,Exception):
-            class R: items=[]; error=str(result)
-            result=R()
-        await save_feed(name,result)
+            market_result = await market_direct.fetch(tracked)
+        except Exception as exc:
+            market_result = type("R", (), {"items":[], "error":f"Market direct: {exc}"})()
+        if not market_result.items:
+            try:
+                market_result = await market_feed.fetch(tracked)
+            except Exception as exc:
+                market_result = type("R", (), {"items":[], "error":f"GDELT: {exc}"})()
+
+        try:
+            insider_result = await insider_feed.fetch(tickers=tracked)
+        except Exception as exc:
+            insider_result = type("R", (), {"items":[], "error":f"SEC: {exc}"})()
+
+        try:
+            congress_result = await congress_feed.fetch()
+        except Exception as exc:
+            congress_result = type("R", (), {"items":[], "error":f"House: {exc}"})()
+
+        try:
+            egypt_result = await egypt_direct.fetch()
+        except Exception as exc:
+            egypt_result = type("R", (), {"items":[], "error":f"Egypt direct: {exc}"})()
+        if not egypt_result.items:
+            try:
+                egypt_result = await egypt_feed.fetch({})
+            except Exception as exc:
+                egypt_result = type("R", (), {"items":[], "error":f"GDELT: {exc}"})()
+
+    for name, result in zip(("market_news", "insiders", "congress", "egypt_news"),
+                            (market_result, insider_result, congress_result, egypt_result)):
+        await save_feed(name, result)
     return await status()
 
 async def scheduler():
@@ -152,7 +144,9 @@ async def health():
     return {"ok":True,"service":"money-that-matters","build":BUILD_VERSION}
 
 @app.get("/api/status")
-async def api_status(): return await status()
+async def api_status(response: Response):
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    return await status()
 
 async def list_feed(collection, feed, sortfield, limit):
     docs=await db[collection].find({"feed":feed}).sort(sortfield,-1).limit(limit).to_list(limit)
@@ -210,5 +204,6 @@ async def refresh():
     return {"accepted":True,"status":await sync_all()}
 
 @app.get("/api/refresh")
-async def refresh_get():
+async def refresh_get(response: Response):
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     return await refresh()

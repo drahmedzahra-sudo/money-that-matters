@@ -6,8 +6,6 @@ from .base import Feed, FeedResult
 from .limiter import sec_limiter
 from ..config import settings
 
-SEC_UNIVERSE="https://www.sec.gov/files/company_tickers.json"
-
 STATIC_CIKS = {
 "AAPL":"320193","MSFT":"789019","NVDA":"1045810","AMZN":"1018724","META":"1326801","GOOGL":"1652044","GOOG":"1652044","AVGO":"1730168","TSLA":"1318605","BRK.B":"1067983","JPM":"19617","V":"1403161","MA":"1141391","LLY":"59478","WMT":"104169","XOM":"2115436","UNH":"731766","ORCL":"1341439","COST":"909832","HD":"354950","PG":"80424","JNJ":"200406","ABBV":"1551152","CRM":"1108524","AMD":"2488","NFLX":"1065280","ADBE":"796343","QCOM":"804328","INTC":"50863","CSCO":"858877"}
 
@@ -38,56 +36,42 @@ def node_text(node, *names):
                 return value.strip()
     return None
 
-async def sec_get(client, url, headers, attempts=4):
+async def sec_get(client, url, headers, attempts=2):
     last=None
     for attempt in range(attempts):
         await sec_limiter.wait("sec")
         try:
             r=await client.get(url,headers=headers,timeout=30)
-            if r.status_code not in (429,503): r.raise_for_status(); return r
+            if r.status_code not in (429,503):
+                r.raise_for_status(); return r
             last=r
         except httpx.HTTPError:
             if attempt==attempts-1: raise
         retry=last.headers.get("Retry-After") if last else None
-        try: delay=float(retry) if retry else min(90,10*(2**attempt))
-        except ValueError: delay=min(90,10*(2**attempt))
+        try: delay=min(20.0, max(2.0, float(retry))) if retry else 5.0
+        except ValueError: delay=5.0
         await asyncio.sleep(delay)
-    last.raise_for_status()
+    if last is not None:
+        last.raise_for_status()
+    raise RuntimeError("SEC request failed")
 
 class SecInsidersFeed(Feed):
     name="insiders"
     def __init__(self, client, db=None): self.client,self.db=client,db
 
     async def _universe(self, headers):
+        # Do not depend on SEC company_tickers.json during every refresh.
+        # That endpoint is optional metadata and can be rate-limited; the
+        # baseline CIK map is authoritative enough for the tracked universe.
+        data={t:{"cik":c,"title":t} for t,c in STATIC_CIKS.items()}
         if self.db is not None:
-            cached=await self.db.sec_cache.find_one({"_id":"company_tickers"})
-            expires_at=cached.get("expires_at") if cached else None
-            if isinstance(expires_at, str):
-                try:
-                    expires_at=datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
-                except ValueError:
-                    expires_at=None
-            if expires_at is not None:
-                try:
-                    if expires_at.tzinfo is None or expires_at.utcoffset() is None:
-                        expires_at=expires_at.replace(tzinfo=timezone.utc)
-                    else:
-                        expires_at=expires_at.astimezone(timezone.utc)
-                except (AttributeError, TypeError, ValueError):
-                    expires_at=None
-            if cached and cached.get("data") and expires_at is not None and expires_at > datetime.now(timezone.utc):
-                return cached["data"]
-        try:
-            r=await sec_get(self.client,SEC_UNIVERSE,headers)
-            raw={str(v['ticker']).upper():{"cik":str(v['cik_str']).zfill(10),"title":v.get('title')} for v in r.json().values()}
-            data={}
-            for k,v in raw.items():
-                data[k]=v
-                if k == "BRK-B": data["BRK.B"]=v
-        except Exception:
-            data={t:{"cik":c,"title":t} for t,c in STATIC_CIKS.items()}
-        if self.db is not None:
-            await self.db.sec_cache.update_one({"_id":"company_tickers"},{"$set":{"data":data,"expires_at":datetime.now(timezone.utc).replace(microsecond=0)+timedelta(hours=24)}},upsert=True)
+            try:
+                cached=await self.db.sec_cache.find_one({"_id":"company_tickers"})
+                cached_data=(cached or {}).get("data") or {}
+                if cached_data:
+                    data.update(cached_data)
+            except Exception:
+                pass
         return data
 
     async def fetch(self, tickers=None):

@@ -37,3 +37,9 @@ def test_sec_cache_datetime_normalization_is_explicit():
     naive=datetime(2026,1,1)
     aware=naive.replace(tzinfo=timezone.utc)
     assert aware.tzinfo is not None
+
+
+def test_sec_universe_uses_static_ciks_without_live_company_tickers_dependency():
+    from app.feeds.sec import STATIC_CIKS
+    assert STATIC_CIKS["AAPL"] == "320193"
+    assert STATIC_CIKS["MSFT"] == "789019"

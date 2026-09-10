@@ -41,14 +41,20 @@ class HouseCongressFeed(Feed):
                     txt_name=next((n for n in names if n.lower().endswith(".txt")),None)
                 if not xml_name and not txt_name:
                     return FeedResult(error="House archive contained no filing index")
+                # The Clerk publishes a tab-delimited TXT index alongside
+                # the XML. Prefer TXT because it is the simplest official
+                # filing index and avoids malformed XML edge cases.
                 rows=None
-                if xml_name:
+                if txt_name:
+                    try:
+                        rows=self._rows_from_text(z.read(txt_name))
+                    except Exception:
+                        rows=None
+                if not rows and xml_name:
                     try:
                         rows=self._rows_from_xml(z.read(xml_name))
                     except Exception:
                         rows=None
-                if not rows and txt_name:
-                    rows=self._rows_from_text(z.read(txt_name))
             items=[]
             for data in rows or []:
                 filing_type=(data.get("filingtype") or data.get("filing_type") or "").strip().upper()
