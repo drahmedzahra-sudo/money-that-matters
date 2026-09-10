@@ -50,7 +50,7 @@ def test_v7_source_integrity_files_are_present():
     main=(root/'app'/'main.py').read_text()
     house=(root/'app'/'feeds'/'house.py').read_text()
     sec=(root/'app'/'feeds'/'sec.py').read_text()
-    assert 'v10-sec-parallel-runtime' in main
+    assert 'v11-sec-malformed-skip-runtime' in main
     assert 'txt_name' in house and 'FD.zip' in house
     assert 'company_tickers' in sec and 'https://www.sec.gov/files/company_tickers.json' not in sec
 
@@ -58,3 +58,18 @@ def test_v7_source_integrity_files_are_present():
 def test_sec_limiter_is_not_serially_slow():
     from app.feeds.limiter import sec_limiter
     assert sec_limiter.min_interval <= 0.2
+
+
+def test_form4_parser_uses_tolerant_fallback_for_mismatched_tags():
+    from app.feeds.sec import parse_form4
+    malformed = b"<ownershipDocument><issuer><issuerTradingSymbol>MSFT</issuerTradingSymbol></issuer><nonDerivativeTransaction><transactionCoding><transactionCode>P</transactionCode></transactionCoding></nonDerivativeTransaction><broken></ownershipDocument>"
+    root, parser = parse_form4(malformed)
+    assert parser == "soup"
+    assert root.find("nonderivativetransaction") is not None
+
+
+def test_sec_malformed_filing_is_isolated():
+    import pathlib
+    text = (pathlib.Path(__file__).parents[1]/'app'/'feeds'/'sec.py').read_text()
+    assert 'One malformed SEC filing must never abort the ticker or feed' in text
+    assert 'except ET.ParseError as exc:' in text

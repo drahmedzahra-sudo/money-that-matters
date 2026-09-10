@@ -23,7 +23,8 @@ def parse_form4(content):
         # tolerant HTML parser lets us recover the fields that are actually
         # present while still requiring explicit Form 4 transaction tags.
         soup = BeautifulSoup(content, "html.parser")
-        if not soup.find("nonderivativetransaction"):
+        tx_nodes = soup.find_all(lambda tag: getattr(tag, "name", "") and tag.name.lower() == "nonderivativetransaction")
+        if not tx_nodes:
             raise
         return soup, "soup"
 
@@ -110,8 +111,13 @@ class SecInsidersFeed(Feed):
                         try:
                             fr=await sec_get(self.client,archive,headers)
                             root, parser = parse_form4(fr.content)
+                        except ET.ParseError as exc:
+                            # One malformed SEC filing must never abort the ticker or feed.
+                            # Skip only this filing and continue with the next Form 4.
+                            continue
                         except Exception as exc:
-                            return [], f"{ticker} filing: {exc}"
+                            # Network/upstream failures are isolated to this filing.
+                            continue
                         if parser == "etree":
                             issuer=(text(root,'.//issuerTradingSymbol') or ticker).upper()
                             owner=root.find('.//reportingOwner')
