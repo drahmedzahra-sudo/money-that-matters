@@ -7,9 +7,10 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from .config import settings
-from .feeds.news import GdeltNewsFeed
+from .feeds.news import GdeltNewsFeed, MarketDirectFeed, EgyptDirectFeed
 from .feeds.sec import SecInsidersFeed
 from .feeds.house import HouseCongressFeed
+from .feeds.limiter import house_limiter, sec_limiter
 from .services.scoring import Signal, money_match, direction
 from .services.dates import utc_age
 from .models import MoneyMatch
@@ -17,7 +18,9 @@ from .models import MoneyMatch
 client = AsyncIOMotorClient(settings.mongodb_url)
 db = client[settings.mongodb_db]
 
+BUILD_VERSION = "v5-sec-house-runtime"
 BASELINE = [x.strip().upper() for x in settings.baseline_tickers.split(',') if x.strip()]
+sync_lock = asyncio.Lock()
 
 async def save_feed(name, result):
     now = datetime.now(timezone.utc)
@@ -33,9 +36,11 @@ async def save_feed(name, result):
             await db[collection].insert_many(result.items, ordered=False)
         await db.feed_state.update_one({"_id":name},{"$set":{"updated_at":now,"error":None,"count":len(result.items)}},upsert=True)
     elif result.error:
-        await db.feed_state.update_one({"_id":name},{"$set":{"error":result.error}},upsert=True)
+        await db.feed_state.update_one({"_id":name},{"$set":{"error":result.error,"last_attempt_at":now}},upsert=True)
+    elif result.error is None:
+        await db.feed_state.update_one({"_id":name},{"$set":{"updated_at":now,"error":None,"count":0}},upsert=True)
     elif not await db.feed_state.find_one({"_id":name}):
-        await db.feed_state.insert_one({"_id":name,"updated_at":None,"error":None,"count":0})
+        await db.feed_state.insert_one({"_id":name,"updated_at":None,"error":result.error,"count":0})
 
 async def ticker_map():
     headers={"User-Agent":settings.sec_user_agent,"Accept-Encoding":"gzip, deflate"}
@@ -55,12 +60,20 @@ async def ticker_map():
     return {t:c for t,c in tracked.items() if t}
 
 async def sync_all():
+    if sync_lock.locked():
+        return await status()
+    async with sync_lock:
+        return await _sync_all_locked()
+
+async def _sync_all_locked():
     tracked=await ticker_map()
     async with httpx.AsyncClient(timeout=30, follow_redirects=True) as c:
         market_feed = GdeltNewsFeed("market_news", settings.market_domains.split(','))
-        insider_feed = SecInsidersFeed(c)
+        insider_feed = SecInsidersFeed(c, db)
         congress_feed = HouseCongressFeed(c)
         egypt_feed = GdeltNewsFeed("egypt_news", settings.egypt_domains.split(','), egypt=True)
+        egypt_direct = EgyptDirectFeed()
+        market_direct = MarketDirectFeed()
         # GDELT is shared by the market and Egypt feeds. Run them sequentially
         # so the host limiter is effective even during a full refresh.
         results=[]
@@ -75,6 +88,30 @@ async def sync_all():
             except Exception as exc:
                 class R: items=[]; error=str(exc)
                 results.append(R())
+    # Keep market news operational when GDELT is rate-limited: use an allow-listed publisher RSS fallback.
+    if results[0].error or not results[0].items:
+        try:
+            direct_market = await market_direct.fetch(tracked)
+            if direct_market.items or not direct_market.error:
+                results[0] = direct_market
+        except Exception:
+            pass
+
+    # Egypt is intentionally independent from Money Match. Prefer the direct
+    # allow-listed publisher first; use compact-query GDELT only as discovery fallback.
+    try:
+        direct = await egypt_direct.fetch()
+        if direct.items:
+            results[3] = direct
+    except Exception:
+        pass
+    if not results[3].items:
+        try:
+            fallback = await egypt_feed.fetch({})
+            if fallback.items:
+                results[3] = fallback
+        except Exception:
+            pass
     for name, result in zip(("market_news", "insiders", "congress", "egypt_news"), results):
         if isinstance(result,Exception):
             class R: items=[]; error=str(result)
@@ -84,8 +121,10 @@ async def sync_all():
 
 async def scheduler():
     while True:
-        try: await sync_all()
-        except Exception: pass
+        try:
+            await sync_all()
+        except Exception as exc:
+            print(f"sync_all failed: {exc!r}", flush=True)
         await asyncio.sleep(max(1,settings.refresh_hours)*3600)
 
 @asynccontextmanager
@@ -104,13 +143,13 @@ async def feed_status(name):
     age=utc_age(updated_at)
     return {"name":name,"mode":"live" if age<=timedelta(hours=24) else "stale","updated_at":updated_at.isoformat(),"error":doc.get("error"),"count":doc.get("count",0)}
 
-async def status(): return {"feeds":[await feed_status(n) for n in ("market_news","insiders","congress","egypt_news")]}
+async def status(): return {"build":BUILD_VERSION,"feeds":[await feed_status(n) for n in ("market_news","insiders","congress","egypt_news")]}
 
 @app.get("/api/health")
 async def health():
     try: await db.command("ping")
     except Exception as e: raise HTTPException(503,str(e))
-    return {"ok":True,"service":"money-that-matters"}
+    return {"ok":True,"service":"money-that-matters","build":BUILD_VERSION}
 
 @app.get("/api/status")
 async def api_status(): return await status()
@@ -169,3 +208,7 @@ async def ticker_detail(ticker: str):
 @app.post("/api/refresh")
 async def refresh():
     return {"accepted":True,"status":await sync_all()}
+
+@app.get("/api/refresh")
+async def refresh_get():
+    return await refresh()

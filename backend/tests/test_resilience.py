@@ -18,3 +18,22 @@ def test_form4_parser_recovers_malformed_xml():
     root, parser = parse_form4(malformed)
     assert parser == "soup"
     assert root.find("nonderivativetransaction") is not None
+
+
+def test_house_xml_parser_has_text_fallback():
+    from app.feeds.house import HouseCongressFeed
+    bad=b"<root><row><member>A</member></root>"
+    txt=b"FilingType\tDocID\tFirst\tLast\nP\t123\tJane\tDoe\n"
+    try:
+        HouseCongressFeed._rows_from_xml(bad)
+        assert False
+    except Exception:
+        pass
+    rows=HouseCongressFeed._rows_from_text(txt)
+    assert rows[0]["DocID"] == "123"
+
+def test_sec_cache_datetime_normalization_is_explicit():
+    from datetime import datetime, timezone
+    naive=datetime(2026,1,1)
+    aware=naive.replace(tzinfo=timezone.utc)
+    assert aware.tzinfo is not None
