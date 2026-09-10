@@ -139,7 +139,7 @@ async def status(): return {"feeds":[await feed_status(n) for n in ("market_news
 async def health():
     try: await db.command("ping")
     except Exception as e: raise HTTPException(503,str(e))
-    return {"ok":True,"service":"money-that-matters"}
+    return {"ok":True,"service":"money-that-matters","build":BUILD_VERSION}
 
 @app.get("/api/status")
 async def api_status(): return await status()

@@ -10,7 +10,15 @@ class HouseCongressFeed(Feed):
 
     def _rows_from_text(self, raw):
         text=raw.decode("utf-8-sig", "replace")
-        rows=list(csv.DictReader(io.StringIO(text), delimiter="\t"))
+        # House archives have historically used tab-delimited TXT indexes,
+        # but tolerate commas/semicolons without inventing fields.
+        sample=text[:4096]
+        try:
+            dialect=csv.Sniffer().sniff(sample, delimiters="\t,;")
+            delimiter=dialect.delimiter
+        except csv.Error:
+            delimiter="\t"
+        rows=list(csv.DictReader(io.StringIO(text), delimiter=delimiter))
         return rows
 
     def _rows_from_xml(self, raw):
@@ -39,7 +47,11 @@ class HouseCongressFeed(Feed):
                 if xml_name:
                     try:
                         rows=self._rows_from_xml(z.read(xml_name))
-                    except ET.ParseError:
+                        if not rows:
+                            rows=None
+                    except Exception:
+                        # The public XML index can be malformed. Fall back to
+                        # the official TXT index from the same House archive.
                         rows=None
                 if rows is None and txt_name:
                     rows=self._rows_from_text(z.read(txt_name))

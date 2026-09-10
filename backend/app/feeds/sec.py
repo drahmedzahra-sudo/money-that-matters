@@ -1,6 +1,6 @@
 import asyncio, hashlib, re, xml.etree.ElementTree as ET
 from bs4 import BeautifulSoup
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import httpx
 from .base import Feed, FeedResult
 from .limiter import sec_limiter
@@ -63,12 +63,18 @@ class SecInsidersFeed(Feed):
             cached=await self.db.sec_cache.find_one({"_id":"company_tickers"})
             expires_at=cached.get("expires_at") if cached else None
             if expires_at is not None:
-                if expires_at.tzinfo is None:
-                    expires_at=expires_at.replace(tzinfo=timezone.utc)
-                else:
-                    expires_at=expires_at.astimezone(timezone.utc)
-            if cached and cached.get("data") and expires_at and expires_at > datetime.now(timezone.utc):
-                return cached["data"]
+                try:
+                    if isinstance(expires_at, str):
+                        expires_at=datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+                    if expires_at.tzinfo is None:
+                        expires_at=expires_at.replace(tzinfo=timezone.utc)
+                    else:
+                        expires_at=expires_at.astimezone(timezone.utc)
+                except (AttributeError, TypeError, ValueError):
+                    expires_at=None
+            if cached and cached.get("data") and expires_at is not None:
+                if expires_at > datetime.now(timezone.utc):
+                    return cached["data"]
         try:
             r=await sec_get(self.client,SEC_UNIVERSE,headers)
             raw={str(v['ticker']).upper():{"cik":str(v['cik_str']).zfill(10),"title":v.get('title')} for v in r.json().values()}
@@ -79,7 +85,7 @@ class SecInsidersFeed(Feed):
         except Exception:
             data={t:{"cik":c,"title":t} for t,c in STATIC_CIKS.items()}
         if self.db is not None:
-            await self.db.sec_cache.update_one({"_id":"company_tickers"},{"$set":{"data":data,"expires_at":datetime.now(timezone.utc).replace(microsecond=0)+__import__('datetime').timedelta(hours=24)}},upsert=True)
+            await self.db.sec_cache.update_one({"_id":"company_tickers"},{"$set":{"data":data,"expires_at":datetime.now(timezone.utc).replace(microsecond=0)+timedelta(hours=24)}},upsert=True)
         return data
 
     async def fetch(self, tickers=None):
@@ -129,7 +135,6 @@ class SecInsidersFeed(Feed):
                             price_text=text(tx,'.//transactionAmounts/transactionPricePerShare/value')
                         else:
                             code=node_text(tx, 'transactioncode')
-                            shares_text=node_text(tx, 'value') if False else node_text(tx.find('transactionamounts') if tx.find('transactionamounts') else tx, 'transactions' )
                             shares_node=tx.find('transactionshares')
                             price_node=tx.find('transactionpricepershare')
                             shares_text=node_text(shares_node, 'value') if shares_node is not None else None
