@@ -61,7 +61,13 @@ class SecInsidersFeed(Feed):
     async def _universe(self, headers):
         if self.db is not None:
             cached=await self.db.sec_cache.find_one({"_id":"company_tickers"})
-            if cached and cached.get("data") and cached.get("expires_at") and cached["expires_at"] > datetime.now(timezone.utc):
+            expires_at=cached.get("expires_at") if cached else None
+            if expires_at is not None:
+                if expires_at.tzinfo is None:
+                    expires_at=expires_at.replace(tzinfo=timezone.utc)
+                else:
+                    expires_at=expires_at.astimezone(timezone.utc)
+            if cached and cached.get("data") and expires_at and expires_at > datetime.now(timezone.utc):
                 return cached["data"]
         try:
             r=await sec_get(self.client,SEC_UNIVERSE,headers)
