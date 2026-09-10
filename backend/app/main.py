@@ -3,6 +3,7 @@ from datetime import datetime, timezone, timedelta
 from contextlib import asynccontextmanager
 from urllib.parse import urlparse
 import httpx
+import logging
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -14,6 +15,7 @@ from .services.scoring import Signal, money_match, direction
 from .services.dates import utc_age
 from .models import MoneyMatch
 
+logger = logging.getLogger(__name__)
 client = AsyncIOMotorClient(settings.mongodb_url)
 db = client[settings.mongodb_db]
 
@@ -84,8 +86,13 @@ async def sync_all():
 
 async def scheduler():
     while True:
-        try: await sync_all()
-        except Exception: pass
+        try:
+            result = await sync_all()
+            logger.info("Scheduled sync complete: %s", result)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("Scheduled sync failed: %s", exc)
         await asyncio.sleep(max(1,settings.refresh_hours)*3600)
 
 @asynccontextmanager

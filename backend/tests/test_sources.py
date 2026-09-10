@@ -14,3 +14,15 @@ def test_egypt_relevance():
     assert egypt_subject_ok('Egypt stocks rally')
     assert egypt_subject_ok('البورصة المصرية ترتفع',native=True)
     assert not egypt_subject_ok('International football results',native=False)
+
+def test_gdelt_empty_response_is_explicit():
+    from app.feeds.news import parse_gdelt_payload
+    class R:
+        text = ''
+        def json(self): raise ValueError('empty')
+    try:
+        parse_gdelt_payload(R())
+    except ValueError as exc:
+        assert 'empty response' in str(exc)
+    else:
+        raise AssertionError('Expected explicit empty-response error')
