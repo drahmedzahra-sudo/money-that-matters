@@ -3,19 +3,18 @@ from datetime import datetime, timezone, timedelta
 from contextlib import asynccontextmanager
 from urllib.parse import urlparse
 import httpx
-import logging
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from .config import settings
-from .feeds.news import GdeltNewsFeed
+from .feeds.news import GdeltNewsFeed, MarketDirectFeed, EgyptDirectFeed
 from .feeds.sec import SecInsidersFeed
 from .feeds.house import HouseCongressFeed
+from .feeds.limiter import house_limiter, sec_limiter
 from .services.scoring import Signal, money_match, direction
 from .services.dates import utc_age
 from .models import MoneyMatch
 
-logger = logging.getLogger(__name__)
 client = AsyncIOMotorClient(settings.mongodb_url)
 db = client[settings.mongodb_db]
 
@@ -36,8 +35,10 @@ async def save_feed(name, result):
         await db.feed_state.update_one({"_id":name},{"$set":{"updated_at":now,"error":None,"count":len(result.items)}},upsert=True)
     elif result.error:
         await db.feed_state.update_one({"_id":name},{"$set":{"error":result.error}},upsert=True)
+    elif result.error is None:
+        await db.feed_state.update_one({"_id":name},{"$set":{"updated_at":now,"error":None,"count":0}},upsert=True)
     elif not await db.feed_state.find_one({"_id":name}):
-        await db.feed_state.insert_one({"_id":name,"updated_at":None,"error":None,"count":0})
+        await db.feed_state.insert_one({"_id":name,"updated_at":None,"error":result.error,"count":0})
 
 async def ticker_map():
     headers={"User-Agent":settings.sec_user_agent,"Accept-Encoding":"gzip, deflate"}
@@ -60,9 +61,11 @@ async def sync_all():
     tracked=await ticker_map()
     async with httpx.AsyncClient(timeout=30, follow_redirects=True) as c:
         market_feed = GdeltNewsFeed("market_news", settings.market_domains.split(','))
-        insider_feed = SecInsidersFeed(c)
+        insider_feed = SecInsidersFeed(c, db)
         congress_feed = HouseCongressFeed(c)
         egypt_feed = GdeltNewsFeed("egypt_news", settings.egypt_domains.split(','), egypt=True)
+        egypt_direct = EgyptDirectFeed()
+        market_direct = MarketDirectFeed()
         # GDELT is shared by the market and Egypt feeds. Run them sequentially
         # so the host limiter is effective even during a full refresh.
         results=[]
@@ -77,6 +80,24 @@ async def sync_all():
             except Exception as exc:
                 class R: items=[]; error=str(exc)
                 results.append(R())
+    # Keep market news operational when GDELT is rate-limited: use an allow-listed publisher RSS fallback.
+    if results[0].error or not results[0].items:
+        try:
+            direct_market = await market_direct.fetch(tracked)
+            if direct_market.items or not direct_market.error:
+                results[0] = direct_market
+        except Exception:
+            pass
+
+    # Egypt is intentionally independent from Money Match. If GDELT fails or returns no usable records,
+    # use the allow-listed direct Egypt source before declaring the feed empty.
+    if results[3].error or not results[3].items:
+        try:
+            direct = await egypt_direct.fetch()
+            if direct.items or not direct.error:
+                results[3] = direct
+        except Exception as exc:
+            pass
     for name, result in zip(("market_news", "insiders", "congress", "egypt_news"), results):
         if isinstance(result,Exception):
             class R: items=[]; error=str(result)
@@ -86,13 +107,8 @@ async def sync_all():
 
 async def scheduler():
     while True:
-        try:
-            result = await sync_all()
-            logger.info("Scheduled sync complete: %s", result)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.exception("Scheduled sync failed: %s", exc)
+        try: await sync_all()
+        except Exception: pass
         await asyncio.sleep(max(1,settings.refresh_hours)*3600)
 
 @asynccontextmanager
