@@ -1,6 +1,1 @@
-v7-source-integrity
-Critical runtime sources are:
-backend/app/main.py
-backend/app/feeds/sec.py
-backend/app/feeds/house.py
-backend/app/feeds/news.py
+v8-concurrent-feed-runtime

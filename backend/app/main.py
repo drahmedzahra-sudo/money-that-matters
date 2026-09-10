@@ -18,7 +18,7 @@ from .models import MoneyMatch
 client = AsyncIOMotorClient(settings.mongodb_url)
 db = client[settings.mongodb_db]
 
-BUILD_VERSION = "v7-source-integrity"
+BUILD_VERSION = "v8-concurrent-feed-runtime"
 BASELINE = [x.strip().upper() for x in settings.baseline_tickers.split(',') if x.strip()]
 sync_lock = asyncio.Lock()
 
@@ -60,9 +60,19 @@ async def ticker_map():
 
 async def sync_all():
     if sync_lock.locked():
-        return await status()
+        current = await status()
+        current["running"] = True
+        return current
     async with sync_lock:
         return await _sync_all_locked()
+
+async def _safe_fetch(label, coro, timeout=90):
+    try:
+        return await asyncio.wait_for(coro, timeout=timeout)
+    except asyncio.TimeoutError:
+        return type("R", (), {"items": [], "error": f"{label}: timeout after {timeout}s"})()
+    except Exception as exc:
+        return type("R", (), {"items": [], "error": f"{label}: {exc}"})()
 
 async def _sync_all_locked():
     tracked=await ticker_map()
@@ -74,37 +84,26 @@ async def _sync_all_locked():
         egypt_direct = EgyptDirectFeed()
         market_direct = MarketDirectFeed()
 
-        # Direct allow-listed publisher feeds are primary. GDELT is only a
-        # discovery fallback and can never overwrite a successful direct feed.
-        try:
-            market_result = await market_direct.fetch(tracked)
-        except Exception as exc:
-            market_result = type("R", (), {"items":[], "error":f"Market direct: {exc}"})()
-        if not market_result.items:
-            try:
-                market_result = await market_feed.fetch(tracked)
-            except Exception as exc:
-                market_result = type("R", (), {"items":[], "error":f"GDELT: {exc}"})()
+        async def market():
+            direct = await _safe_fetch("Market direct", market_direct.fetch(tracked), 45)
+            if direct.items:
+                return direct
+            fallback = await _safe_fetch("GDELT", market_feed.fetch(tracked), 45)
+            return fallback if fallback.items else direct if direct.error else fallback
 
-        try:
-            insider_result = await insider_feed.fetch(tickers=tracked)
-        except Exception as exc:
-            insider_result = type("R", (), {"items":[], "error":f"SEC: {exc}"})()
+        async def egypt():
+            direct = await _safe_fetch("Egypt direct", egypt_direct.fetch(), 45)
+            if direct.items:
+                return direct
+            fallback = await _safe_fetch("GDELT", egypt_feed.fetch({}), 45)
+            return fallback if fallback.items else direct if direct.error else fallback
 
-        try:
-            congress_result = await congress_feed.fetch()
-        except Exception as exc:
-            congress_result = type("R", (), {"items":[], "error":f"House: {exc}"})()
-
-        try:
-            egypt_result = await egypt_direct.fetch()
-        except Exception as exc:
-            egypt_result = type("R", (), {"items":[], "error":f"Egypt direct: {exc}"})()
-        if not egypt_result.items:
-            try:
-                egypt_result = await egypt_feed.fetch({})
-            except Exception as exc:
-                egypt_result = type("R", (), {"items":[], "error":f"GDELT: {exc}"})()
+        market_result, insider_result, congress_result, egypt_result = await asyncio.gather(
+            market(),
+            _safe_fetch("SEC", insider_feed.fetch(tickers=tracked), 120),
+            _safe_fetch("House", congress_feed.fetch(), 60),
+            egypt(),
+        )
 
     for name, result in zip(("market_news", "insiders", "congress", "egypt_news"),
                             (market_result, insider_result, congress_result, egypt_result)):
@@ -143,6 +142,7 @@ async def build_manifest():
         "build": BUILD_VERSION,
         "critical_sources": {
             "main": BUILD_VERSION,
+            "runtime": "concurrent-independent-feed-saves",
             "sec": "static-cik-universe",
             "house": "txt-first-xml-fallback",
             "market": "direct-cnbc-first-gdelt-fallback",

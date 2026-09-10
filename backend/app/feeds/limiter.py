@@ -20,5 +20,5 @@ class HostLimiter:
             self._last[host] = time.monotonic()
 
 gdelt_limiter = HostLimiter(5.0)
-sec_limiter = HostLimiter(1.2)
+sec_limiter = HostLimiter(0.15)
 house_limiter = HostLimiter(1.0)
