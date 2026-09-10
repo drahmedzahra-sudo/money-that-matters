@@ -11,13 +11,15 @@ class HouseCongressFeed(Feed):
     @staticmethod
     def _rows_from_text(raw):
         text=raw.decode("utf-8-sig", "replace")
-        sample=text[:4096]
-        try:
-            dialect=csv.Sniffer().sniff(sample, delimiters="\t,;")
-            delimiter=dialect.delimiter
-        except csv.Error:
-            delimiter="\t"
-        return list(csv.DictReader(io.StringIO(text), delimiter=delimiter))
+        sample=text[:8192]
+        for delimiter in ("\t", ",", ";"):
+            try:
+                rows=list(csv.DictReader(io.StringIO(text), delimiter=delimiter))
+                if rows and any((r.get("DocID") or r.get("docid") or r.get("DocumentID") or r.get("documentid")) for r in rows):
+                    return rows
+            except csv.Error:
+                pass
+        return []
 
     @staticmethod
     def _rows_from_xml(raw):
@@ -25,51 +27,64 @@ class HouseCongressFeed(Feed):
         rows=[]
         for row in root.iter():
             data={c.tag.lower().split("}")[-1]:(c.text or "").strip() for c in row}
-            if data: rows.append(data)
+            if data and (data.get("docid") or data.get("documentid")):
+                rows.append(data)
         return rows
 
     async def fetch(self, year=2026):
         url=f"https://disclosures-clerk.house.gov/public_disc/financial-pdfs/{year}FD.zip"
         try:
             await house_limiter.wait("disclosures-clerk.house.gov")
-            r=await self.client.get(url,timeout=30); r.raise_for_status()
+            r=await self.client.get(url,timeout=30)
+            r.raise_for_status()
             with zipfile.ZipFile(io.BytesIO(r.content)) as z:
                 names=z.namelist()
-                xml_name=next((n for n in names if n.lower()==f"{year}fd.xml".lower()),None)
-                txt_name=next((n for n in names if n.lower()==f"{year}fd.txt".lower()),None)
+                txt_name=next((n for n in names if n.lower()==f"{year}fd.txt"),None)
                 if not txt_name:
                     txt_name=next((n for n in names if n.lower().endswith(".txt")),None)
-                if not xml_name and not txt_name:
-                    return FeedResult(error="House archive contained no filing index")
-                # The Clerk publishes a tab-delimited TXT index alongside
-                # the XML. Prefer TXT because it is the simplest official
-                # filing index and avoids malformed XML edge cases.
-                rows=None
+                xml_name=next((n for n in names if n.lower()==f"{year}fd.xml"),None)
+                rows=[]
                 if txt_name:
-                    try:
-                        rows=self._rows_from_text(z.read(txt_name))
-                    except Exception:
-                        rows=None
+                    rows=self._rows_from_text(z.read(txt_name))
                 if not rows and xml_name:
                     try:
                         rows=self._rows_from_xml(z.read(xml_name))
-                    except Exception:
-                        rows=None
+                    except ET.ParseError:
+                        rows=[]
+            if not rows:
+                return FeedResult([], "House filing index contained no parseable rows")
+
             items=[]
-            for data in rows or []:
-                filing_type=(data.get("filingtype") or data.get("filing_type") or "").strip().upper()
+            for data in rows:
+                normalized={str(k).lower().replace("_", ""): (v or "").strip() for k,v in data.items()}
+                filing_type=(normalized.get("filingtype") or "").upper()
                 if filing_type and filing_type != "P":
                     continue
-                doc=(data.get("docid") or data.get("documentid") or "").strip()
-                if not doc: continue
-                first=(data.get("first") or "").strip()
-                last=(data.get("last") or "").strip()
-                suffix=(data.get("suffix") or "").strip()
-                member=" ".join(x for x in (first,last,suffix) if x) or (data.get("member") or data.get("filingmember") or "").strip()
-                if not member: continue
-                district=(data.get("statedst") or data.get("district") or "").strip() or None
-                filing_date=(data.get("filingdate") or "").strip()
-                items.append({"id":doc,"member":member,"district":district,"filing_date":filing_date,"document_id":doc,"filing_type":filing_type or "P","source_url":HOUSE_SOURCE,"ticker":None,"action":None,"feed_mode":"live"})
+                doc=normalized.get("docid") or normalized.get("documentid")
+                if not doc:
+                    continue
+                first=normalized.get("first") or ""
+                last=normalized.get("last") or ""
+                suffix=normalized.get("suffix") or ""
+                member=" ".join(x for x in (first,last,suffix) if x).strip()
+                if not member:
+                    member=normalized.get("member") or normalized.get("filingmember") or ""
+                if not member:
+                    continue
+                district=normalized.get("statedst") or normalized.get("district") or None
+                filing_date=normalized.get("filingdate") or ""
+                items.append({
+                    "id":doc,
+                    "member":member,
+                    "district":district,
+                    "filing_date":filing_date,
+                    "document_id":doc,
+                    "filing_type":filing_type or "P",
+                    "source_url":HOUSE_SOURCE,
+                    "ticker":None,
+                    "action":None,
+                    "feed_mode":"live",
+                })
             return FeedResult(items)
         except Exception as exc:
-            return FeedResult(error=f"House: {exc}")
+            return FeedResult([], f"House: {exc}")

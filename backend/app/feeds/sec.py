@@ -36,7 +36,7 @@ def node_text(node, *names):
                 return value.strip()
     return None
 
-async def sec_get(client, url, headers, attempts=2):
+async def sec_get(client, url, headers, attempts=1):
     last=None
     for attempt in range(attempts):
         await sec_limiter.wait("sec")
@@ -80,26 +80,34 @@ class SecInsidersFeed(Feed):
             universe=await self._universe(headers)
             wanted=[t.upper() for t in (tickers or {}) if re.fullmatch(r"[A-Z]{1,6}(?:\.[A-Z])?",t)]
             items=[]
+            failures=[]
             for ticker in wanted:
                 meta=universe.get(ticker)
-                if not meta: continue
+                if not meta:
+                    continue
                 try:
                     sr=await sec_get(self.client,f"https://data.sec.gov/submissions/CIK{meta['cik']}.json",headers)
-                except Exception:
+                except Exception as exc:
+                    failures.append(f"{ticker}: {exc}")
                     continue
-                recent=sr.json().get('filings',{}).get('recent',{})
+                try:
+                    recent=sr.json().get('filings',{}).get('recent',{})
+                except Exception as exc:
+                    failures.append(f"{ticker}: invalid SEC JSON: {exc}")
+                    continue
                 count=0
                 for i,form in enumerate(recent.get('form',[])):
                     if form!='4' or count>=1: continue
-                    accession=recent.get('accessionNumber',[''])[i]; filed=recent.get('filingDate',[''])[i]; primary=recent.get('primaryDocument',[''])[i]
+                    accession=recent.get('accessionNumber',[''])[i]
+                    filed=recent.get('filingDate',[''])[i]
+                    primary=recent.get('primaryDocument',[''])[i]
                     if not accession or not primary: continue
                     archive=f"https://www.sec.gov/Archives/edgar/data/{int(meta['cik'])}/{accession.replace('-', '')}/{primary}"
                     try:
                         fr=await sec_get(self.client,archive,headers)
                         root, parser = parse_form4(fr.content)
-                    except Exception:
-                        # A malformed individual filing must never poison the
-                        # entire insider feed. Skip only this filing.
+                    except Exception as exc:
+                        failures.append(f"{ticker} filing: {exc}")
                         continue
                     if parser == "etree":
                         issuer=(text(root,'.//issuerTradingSymbol') or ticker).upper()
@@ -113,7 +121,8 @@ class SecInsidersFeed(Feed):
                         owner_name=node_text(owner, 'rptownername') if owner is not None else None
                         role=(node_text(owner, 'officertitle') if owner is not None else None) or ('Director' if node_text(owner, 'isdirector')=='1' else None)
                         transactions=root.find_all('nonderivativetransaction')
-                    if not re.fullmatch(r"[A-Z]{1,6}(?:\.[A-Z])?",issuer): continue
+                    if not re.fullmatch(r"[A-Z]{1,6}(?:\.[A-Z])?",issuer):
+                        continue
                     for tx in transactions:
                         if parser == "etree":
                             code=text(tx,'.//transactionCoding/transactionCode')
@@ -121,7 +130,6 @@ class SecInsidersFeed(Feed):
                             price_text=text(tx,'.//transactionAmounts/transactionPricePerShare/value')
                         else:
                             code=node_text(tx, 'transactioncode')
-                            shares_text=node_text(tx, 'value') if False else node_text(tx.find('transactionamounts') if tx.find('transactionamounts') else tx, 'transactions' )
                             shares_node=tx.find('transactionshares')
                             price_node=tx.find('transactionpricepershare')
                             shares_text=node_text(shares_node, 'value') if shares_node is not None else None
@@ -133,5 +141,10 @@ class SecInsidersFeed(Feed):
                         except (TypeError,ValueError): price=None
                         items.append({"id":hashlib.sha256((issuer+accession+str(len(items))).encode()).hexdigest()[:20],"ticker":issuer,"company":meta.get('title'),"insider_name":owner_name or 'Unavailable in filing',"role":role,"action":'buy' if code=='P' else 'sell',"shares":shares,"dollar_value":shares*price if shares is not None and price is not None else None,"filing_date":filed,"source_url":archive,"feed_mode":"live"})
                     count+=1
-            return FeedResult(items)
-        except Exception as exc: return FeedResult([],f"SEC: {exc}")
+            if items:
+                return FeedResult(items)
+            if failures:
+                return FeedResult([], "SEC upstream unavailable: " + "; ".join(failures[:3]))
+            return FeedResult([])
+        except Exception as exc:
+            return FeedResult([],f"SEC: {exc}")

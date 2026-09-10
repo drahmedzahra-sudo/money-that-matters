@@ -18,7 +18,7 @@ from .models import MoneyMatch
 client = AsyncIOMotorClient(settings.mongodb_url)
 db = client[settings.mongodb_db]
 
-BUILD_VERSION = "v6-rate-limit-direct-first"
+BUILD_VERSION = "v7-source-integrity"
 BASELINE = [x.strip().upper() for x in settings.baseline_tickers.split(',') if x.strip()]
 sync_lock = asyncio.Lock()
 
@@ -136,6 +136,19 @@ async def feed_status(name):
     return {"name":name,"mode":"live" if age<=timedelta(hours=24) else "stale","updated_at":updated_at.isoformat(),"error":doc.get("error"),"count":doc.get("count",0)}
 
 async def status(): return {"build":BUILD_VERSION,"feeds":[await feed_status(n) for n in ("market_news","insiders","congress","egypt_news")]}
+
+@app.get("/api/build-manifest")
+async def build_manifest():
+    return {
+        "build": BUILD_VERSION,
+        "critical_sources": {
+            "main": BUILD_VERSION,
+            "sec": "static-cik-universe",
+            "house": "txt-first-xml-fallback",
+            "market": "direct-cnbc-first-gdelt-fallback",
+            "egypt": "direct-ahram-first-gdelt-fallback",
+        },
+    }
 
 @app.get("/api/health")
 async def health():

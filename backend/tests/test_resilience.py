@@ -43,3 +43,13 @@ def test_sec_universe_uses_static_ciks_without_live_company_tickers_dependency()
     from app.feeds.sec import STATIC_CIKS
     assert STATIC_CIKS["AAPL"] == "320193"
     assert STATIC_CIKS["MSFT"] == "789019"
+
+def test_v7_source_integrity_files_are_present():
+    from pathlib import Path
+    root=Path(__file__).parents[1]
+    main=(root/'app'/'main.py').read_text()
+    house=(root/'app'/'feeds'/'house.py').read_text()
+    sec=(root/'app'/'feeds'/'sec.py').read_text()
+    assert 'v7-source-integrity' in main
+    assert 'txt_name' in house and 'FD.zip' in house
+    assert 'company_tickers' in sec and 'https://www.sec.gov/files/company_tickers.json' not in sec

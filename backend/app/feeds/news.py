@@ -21,7 +21,7 @@ def classify(text: str) -> str:
     s = sum(1 for x in BEARISH if x in t)
     return "bullish" if b > s else "bearish" if s > b else "neutral"
 
-async def gdelt_get(client, params, attempts=4):
+async def gdelt_get(client, params, attempts=1):
     for attempt in range(attempts):
         await gdelt_limiter.wait("api.gdeltproject.org")
         try:
