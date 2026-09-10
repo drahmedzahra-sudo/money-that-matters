@@ -10,3 +10,11 @@ def test_no_placeholder_or_demo_data():
     text='\n'.join(p.read_text(errors='ignore') for p in root.rglob('*.py'))
     assert 'demo' not in text.lower()
     assert 'sample data' not in text.lower()
+
+
+def test_form4_parser_recovers_malformed_xml():
+    from app.feeds.sec import parse_form4
+    malformed = b'''<ownershipDocument><issuer><issuerTradingSymbol>AAPL</issuerTradingSymbol></issuer>\n    <nonDerivativeTransaction><transactionCoding><transactionCode>P</transactionCode></transactionCoding>\n    <transactionAmounts><transactionShares><value>10</value></transactionShares></transactionAmounts>\n    </nonDerivativeTransaction><broken>oops</ownershipDocument>'''
+    root, parser = parse_form4(malformed)
+    assert parser == "soup"
+    assert root.find("nonderivativetransaction") is not None

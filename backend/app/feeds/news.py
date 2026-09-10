@@ -69,8 +69,16 @@ class GdeltNewsFeed(Feed):
 
     async def fetch(self, tickers=None):
         tickers = tickers or {}
-        domain_query = " OR ".join(f"domainis:{d.strip()}" for d in self.domains if d.strip())
-        query = f"({domain_query})" + (" (Egypt OR EGX OR مصر OR البورصة)" if self.egypt else " (earnings OR guidance OR stocks OR shares OR market OR rates OR tariff OR sector OR index)")
+        if self.egypt:
+            # Keep the GDELT query compact. A long OR-list can be rejected by
+            # GDELT before it even reaches the rate limiter. Direct Egypt
+            # publishers are preferred by sync_all; this is only an index fallback.
+            egypt_domains = [d.strip() for d in self.domains if d.strip()][:4]
+            domain_query = " OR ".join(f"domainis:{d}" for d in egypt_domains)
+            query = f"({domain_query}) Egypt" if domain_query else "Egypt"
+        else:
+            domain_query = " OR ".join(f"domainis:{d.strip()}" for d in self.domains if d.strip())
+            query = f"({domain_query}) (earnings OR guidance OR stocks OR shares OR market OR rates OR tariff OR sector OR index)"
         params = {"query": query, "mode": "artlist", "maxrecords": 100, "format": "json", "sort": "datedesc", "timespan": "24h"}
         try:
             async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:

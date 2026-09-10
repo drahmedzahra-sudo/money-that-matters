@@ -1,4 +1,5 @@
 import asyncio, hashlib, re, xml.etree.ElementTree as ET
+from bs4 import BeautifulSoup
 from datetime import datetime, timezone
 import httpx
 from .base import Feed, FeedResult
@@ -14,6 +15,28 @@ STATIC_CIKS = {
 def text(node, path):
     x=node.find(path) if node is not None else None
     return (x.text or '').strip() if x is not None else None
+
+def parse_form4(content):
+    """Parse SEC Form 4 XML, tolerating malformed publisher XML without inventing data."""
+    try:
+        return ET.fromstring(content), "etree"
+    except ET.ParseError:
+        # Some public Form 4 documents have malformed XML. BeautifulSoup's
+        # tolerant HTML parser lets us recover the fields that are actually
+        # present while still requiring explicit Form 4 transaction tags.
+        soup = BeautifulSoup(content, "html.parser")
+        if not soup.find("nonderivativetransaction"):
+            raise
+        return soup, "soup"
+
+def node_text(node, *names):
+    for name in names:
+        found = node.find(name) if hasattr(node, "find") else None
+        if found is not None:
+            value = getattr(found, "text", None)
+            if value:
+                return value.strip()
+    return None
 
 async def sec_get(client, url, headers, attempts=4):
     last=None
@@ -75,20 +98,40 @@ class SecInsidersFeed(Feed):
                     archive=f"https://www.sec.gov/Archives/edgar/data/{int(meta['cik'])}/{accession.replace('-', '')}/{primary}"
                     try:
                         fr=await sec_get(self.client,archive,headers)
-                        root=ET.fromstring(fr.content)
+                        root, parser = parse_form4(fr.content)
                     except Exception:
+                        # A malformed individual filing must never poison the
+                        # entire insider feed. Skip only this filing.
                         continue
-                    issuer=(text(root,'.//issuerTradingSymbol') or ticker).upper()
+                    if parser == "etree":
+                        issuer=(text(root,'.//issuerTradingSymbol') or ticker).upper()
+                        owner=root.find('.//reportingOwner')
+                        owner_name=text(owner,'.//rptOwnerName') if owner is not None else None
+                        role=(text(owner,'.//officerTitle') if owner is not None else None) or ('Director' if text(owner,'.//isDirector')=='1' else None)
+                        transactions=root.findall('.//nonDerivativeTransaction')
+                    else:
+                        issuer=(node_text(root, 'issuertradingsymbol') or ticker).upper()
+                        owner=root.find('reportingowner')
+                        owner_name=node_text(owner, 'rptownername') if owner is not None else None
+                        role=(node_text(owner, 'officertitle') if owner is not None else None) or ('Director' if node_text(owner, 'isdirector')=='1' else None)
+                        transactions=root.find_all('nonderivativetransaction')
                     if not re.fullmatch(r"[A-Z]{1,6}(?:\.[A-Z])?",issuer): continue
-                    owner=root.find('.//reportingOwner')
-                    owner_name=text(owner,'.//rptOwnerName') if owner is not None else None
-                    role=(text(owner,'.//officerTitle') if owner is not None else None) or ('Director' if text(owner,'.//isDirector')=='1' else None)
-                    for tx in root.findall('.//nonDerivativeTransaction'):
-                        code=text(tx,'.//transactionCoding/transactionCode')
+                    for tx in transactions:
+                        if parser == "etree":
+                            code=text(tx,'.//transactionCoding/transactionCode')
+                            shares_text=text(tx,'.//transactionAmounts/transactionShares/value')
+                            price_text=text(tx,'.//transactionAmounts/transactionPricePerShare/value')
+                        else:
+                            code=node_text(tx, 'transactioncode')
+                            shares_text=node_text(tx, 'value') if False else node_text(tx.find('transactionamounts') if tx.find('transactionamounts') else tx, 'transactions' )
+                            shares_node=tx.find('transactionshares')
+                            price_node=tx.find('transactionpricepershare')
+                            shares_text=node_text(shares_node, 'value') if shares_node is not None else None
+                            price_text=node_text(price_node, 'value') if price_node is not None else None
                         if code not in ('P','S'): continue
-                        try: shares=float(text(tx,'.//transactionAmounts/transactionShares/value'))
+                        try: shares=float(shares_text)
                         except (TypeError,ValueError): shares=None
-                        try: price=float(text(tx,'.//transactionAmounts/transactionPricePerShare/value'))
+                        try: price=float(price_text)
                         except (TypeError,ValueError): price=None
                         items.append({"id":hashlib.sha256((issuer+accession+str(len(items))).encode()).hexdigest()[:20],"ticker":issuer,"company":meta.get('title'),"insider_name":owner_name or 'Unavailable in filing',"role":role,"action":'buy' if code=='P' else 'sell',"shares":shares,"dollar_value":shares*price if shares is not None and price is not None else None,"filing_date":filed,"source_url":archive,"feed_mode":"live"})
                     count+=1

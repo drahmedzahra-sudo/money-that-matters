@@ -89,14 +89,20 @@ async def sync_all():
         except Exception:
             pass
 
-    # Egypt is intentionally independent from Money Match. If GDELT fails or returns no usable records,
-    # use the allow-listed direct Egypt source before declaring the feed empty.
-    if results[3].error or not results[3].items:
+    # Egypt is intentionally independent from Money Match. Prefer the direct
+    # allow-listed publisher first; use compact-query GDELT only as discovery fallback.
+    try:
+        direct = await egypt_direct.fetch()
+        if direct.items:
+            results[3] = direct
+    except Exception:
+        pass
+    if not results[3].items:
         try:
-            direct = await egypt_direct.fetch()
-            if direct.items or not direct.error:
-                results[3] = direct
-        except Exception as exc:
+            fallback = await egypt_feed.fetch({})
+            if fallback.items:
+                results[3] = fallback
+        except Exception:
             pass
     for name, result in zip(("market_news", "insiders", "congress", "egypt_news"), results):
         if isinstance(result,Exception):
