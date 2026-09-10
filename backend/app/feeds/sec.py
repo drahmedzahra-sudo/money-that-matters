@@ -42,7 +42,7 @@ async def sec_get(client, url, headers, attempts=1):
     for attempt in range(attempts):
         await sec_limiter.wait("sec")
         try:
-            r=await client.get(url,headers=headers,timeout=20)
+            r=await client.get(url,headers=headers,timeout=8)
             if r.status_code not in (429,503):
                 r.raise_for_status(); return r
             last=r
@@ -82,7 +82,7 @@ class SecInsidersFeed(Feed):
             wanted=[t.upper() for t in (tickers or {}) if re.fullmatch(r"[A-Z]{1,6}(?:\.[A-Z])?",t)]
             # SEC requests are I/O bound. Run a small bounded number in parallel;
             # the shared host limiter still enforces the SEC request interval.
-            semaphore=asyncio.Semaphore(6)
+            semaphore=asyncio.Semaphore(8)
 
             async def one_ticker(ticker):
                 meta=universe.get(ticker)

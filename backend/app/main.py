@@ -18,7 +18,7 @@ from .models import MoneyMatch
 client = AsyncIOMotorClient(settings.mongodb_url)
 db = client[settings.mongodb_db]
 
-BUILD_VERSION = "v11-sec-malformed-skip-runtime"
+BUILD_VERSION = "v12-sec-fast-fail-runtime"
 BASELINE = [x.strip().upper() for x in settings.baseline_tickers.split(',') if x.strip()]
 sync_lock = asyncio.Lock()
 
@@ -100,7 +100,7 @@ async def _sync_all_locked():
 
         market_result, insider_result, congress_result, egypt_result = await asyncio.gather(
             market(),
-            _safe_fetch("SEC", insider_feed.fetch(tickers=tracked), 120),
+            _safe_fetch("SEC", insider_feed.fetch(tickers=tracked), 75),
             _safe_fetch("House", congress_feed.fetch(), 60),
             egypt(),
         )
