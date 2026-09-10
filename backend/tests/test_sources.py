@@ -24,4 +24,4 @@ def test_egypt_uses_official_egx_source_in_sync():
     from pathlib import Path
     main=(Path(__file__).parents[1]/"app"/"main.py").read_text()
     assert "EgyptEGXFeed" in main
-    assert "official-egx-plus-ahram-plus-gdelt" in main
+    assert "Egyptian Exchange (EGX)" in main and "Ahram Online Markets & Companies" in main

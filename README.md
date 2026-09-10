@@ -134,3 +134,7 @@ https://disclosures-clerk.house.gov/FinancialDisclosure/ViewSearch
 
 GDELT DOC 2.0 documentation and domain operators:
 https://blog.gdeltproject.org/gdelt-doc-2-0-api-debuts/
+
+
+## Current scope
+Egypt / EGX only. The runtime refreshes official EGX disclosures/news plus verified Ahram Online Markets & Companies articles. US SEC/Congress feeds are not active in this Egypt-only build.

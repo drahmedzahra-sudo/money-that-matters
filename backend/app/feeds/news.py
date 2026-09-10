@@ -3,7 +3,6 @@ from urllib.parse import urlparse
 from email.utils import parsedate_to_datetime
 import datetime as dtmod
 import re as _re
-import feedparser
 import httpx
 from .base import Feed, FeedResult
 from .limiter import gdelt_limiter
@@ -89,6 +88,7 @@ class GdeltNewsFeed(Feed):
                     # GDELT supports RSS for ArticleList; use it as a fallback when a JSON response is empty/non-JSON.
                     rss_params = dict(params); rss_params["format"] = "rss"
                     rr = await gdelt_get(client, rss_params)
+                    import feedparser
                     parsed = feedparser.parse(rr.text)
                     entries = []
                     for e in parsed.entries:
@@ -126,6 +126,7 @@ class MarketDirectFeed(Feed):
             async with httpx.AsyncClient(timeout=30,follow_redirects=True,headers=headers) as client:
                 for url in self.URLS:
                     r=await client.get(url); r.raise_for_status()
+                    import feedparser
                     parsed=feedparser.parse(r.text)
                     for e in parsed.entries:
                         link=getattr(e,"link",""); title=(getattr(e,"title","") or "").strip()
@@ -266,8 +267,16 @@ class EgyptDirectFeed(Feed):
                         href=a.get("href","")
                         if len(title)<20 or len(title)>240 or href in seen: continue
                         link=httpx.URL(url).join(href)
-                        if not host_allowed(str(link), EGYPT_ALLOWED): continue
+                        link_s = str(link)
+                        if not host_allowed(link_s, {"ahram.org.eg"}): continue
+                        path = urlparse(link_s).path.lower()
+                        # Stay inside Ahram Business > Markets & Companies.
+                        # This prevents the page's Latest News / Most Viewed blocks
+                        # from leaking politics or sports into the market feed.
+                        if "/category/3/14/business/" not in path and "/allcategory/3/14/business/" not in path and "newscategoryid=14" not in link_s.lower(): continue
                         if not egypt_subject_ok(title, native=False): continue
+                        banned = ["premier league", "football", "soccer", "ahly", "al ahly", "champions league", "tennis", "arsenal", "palestinians", "settlements", "ceasefire"]
+                        if any(x in title.lower() for x in banned): continue
                         seen.add(href)
                         candidates.append((str(link),title))
                         if len(candidates)>=25: break
