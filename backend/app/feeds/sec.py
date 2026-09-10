@@ -41,7 +41,7 @@ async def sec_get(client, url, headers, attempts=1):
     for attempt in range(attempts):
         await sec_limiter.wait("sec")
         try:
-            r=await client.get(url,headers=headers,timeout=30)
+            r=await client.get(url,headers=headers,timeout=20)
             if r.status_code not in (429,503):
                 r.raise_for_status(); return r
             last=r
@@ -79,70 +79,83 @@ class SecInsidersFeed(Feed):
         try:
             universe=await self._universe(headers)
             wanted=[t.upper() for t in (tickers or {}) if re.fullmatch(r"[A-Z]{1,6}(?:\.[A-Z])?",t)]
-            items=[]
-            failures=[]
-            for ticker in wanted:
+            # SEC requests are I/O bound. Run a small bounded number in parallel;
+            # the shared host limiter still enforces the SEC request interval.
+            semaphore=asyncio.Semaphore(6)
+
+            async def one_ticker(ticker):
                 meta=universe.get(ticker)
                 if not meta:
-                    continue
-                try:
-                    sr=await sec_get(self.client,f"https://data.sec.gov/submissions/CIK{meta['cik']}.json",headers)
-                except Exception as exc:
-                    failures.append(f"{ticker}: {exc}")
-                    continue
-                try:
-                    recent=sr.json().get('filings',{}).get('recent',{})
-                except Exception as exc:
-                    failures.append(f"{ticker}: invalid SEC JSON: {exc}")
-                    continue
-                count=0
-                for i,form in enumerate(recent.get('form',[])):
-                    if form!='4' or count>=1: continue
-                    accession=recent.get('accessionNumber',[''])[i]
-                    filed=recent.get('filingDate',[''])[i]
-                    primary=recent.get('primaryDocument',[''])[i]
-                    if not accession or not primary: continue
-                    archive=f"https://www.sec.gov/Archives/edgar/data/{int(meta['cik'])}/{accession.replace('-', '')}/{primary}"
+                    return [], None
+                async with semaphore:
                     try:
-                        fr=await sec_get(self.client,archive,headers)
-                        root, parser = parse_form4(fr.content)
+                        sr=await sec_get(self.client,f"https://data.sec.gov/submissions/CIK{meta['cik']}.json",headers)
                     except Exception as exc:
-                        failures.append(f"{ticker} filing: {exc}")
-                        continue
-                    if parser == "etree":
-                        issuer=(text(root,'.//issuerTradingSymbol') or ticker).upper()
-                        owner=root.find('.//reportingOwner')
-                        owner_name=text(owner,'.//rptOwnerName') if owner is not None else None
-                        role=(text(owner,'.//officerTitle') if owner is not None else None) or ('Director' if text(owner,'.//isDirector')=='1' else None)
-                        transactions=root.findall('.//nonDerivativeTransaction')
-                    else:
-                        issuer=(node_text(root, 'issuertradingsymbol') or ticker).upper()
-                        owner=root.find('reportingowner')
-                        owner_name=node_text(owner, 'rptownername') if owner is not None else None
-                        role=(node_text(owner, 'officertitle') if owner is not None else None) or ('Director' if node_text(owner, 'isdirector')=='1' else None)
-                        transactions=root.find_all('nonderivativetransaction')
-                    if not re.fullmatch(r"[A-Z]{1,6}(?:\.[A-Z])?",issuer):
-                        continue
-                    for tx in transactions:
+                        return [], f"{ticker}: {exc}"
+                    try:
+                        payload=sr.json()
+                        recent=payload.get('filings',{}).get('recent',{})
+                    except Exception as exc:
+                        return [], f"{ticker}: invalid SEC JSON: {exc}"
+                    company=payload.get('name') or meta.get('title') or ticker
+                    for i,form in enumerate(recent.get('form',[])):
+                        if form!='4':
+                            continue
+                        accession=recent.get('accessionNumber',[''])[i]
+                        filed=recent.get('filingDate',[''])[i]
+                        primary=recent.get('primaryDocument',[''])[i]
+                        if not accession or not primary:
+                            continue
+                        archive=f"https://www.sec.gov/Archives/edgar/data/{int(meta['cik'])}/{accession.replace('-', '')}/{primary}"
+                        try:
+                            fr=await sec_get(self.client,archive,headers)
+                            root, parser = parse_form4(fr.content)
+                        except Exception as exc:
+                            return [], f"{ticker} filing: {exc}"
                         if parser == "etree":
-                            code=text(tx,'.//transactionCoding/transactionCode')
-                            shares_text=text(tx,'.//transactionAmounts/transactionShares/value')
-                            price_text=text(tx,'.//transactionAmounts/transactionPricePerShare/value')
+                            issuer=(text(root,'.//issuerTradingSymbol') or ticker).upper()
+                            owner=root.find('.//reportingOwner')
+                            owner_name=text(owner,'.//rptOwnerName') if owner is not None else None
+                            role=(text(owner,'.//officerTitle') if owner is not None else None) or ('Director' if text(owner,'.//isDirector')=='1' else None)
+                            transactions=root.findall('.//nonDerivativeTransaction')
                         else:
-                            code=node_text(tx, 'transactioncode')
-                            shares_node=tx.find('transactionshares')
-                            price_node=tx.find('transactionpricepershare')
-                            shares_text=node_text(shares_node, 'value') if shares_node is not None else None
-                            price_text=node_text(price_node, 'value') if price_node is not None else None
-                        if code not in ('P','S'): continue
-                        try: shares=float(shares_text)
-                        except (TypeError,ValueError): shares=None
-                        try: price=float(price_text)
-                        except (TypeError,ValueError): price=None
-                        items.append({"id":hashlib.sha256((issuer+accession+str(len(items))).encode()).hexdigest()[:20],"ticker":issuer,"company":meta.get('title'),"insider_name":owner_name or 'Unavailable in filing',"role":role,"action":'buy' if code=='P' else 'sell',"shares":shares,"dollar_value":shares*price if shares is not None and price is not None else None,"filing_date":filed,"source_url":archive,"feed_mode":"live"})
-                    count+=1
+                            issuer=(node_text(root, 'issuertradingsymbol') or ticker).upper()
+                            owner=root.find('reportingowner')
+                            owner_name=node_text(owner, 'rptownername') if owner is not None else None
+                            role=(node_text(owner, 'officertitle') if owner is not None else None) or ('Director' if node_text(owner, 'isdirector')=='1' else None)
+                            transactions=root.find_all('nonderivativetransaction')
+                        if not re.fullmatch(r"[A-Z]{1,6}(?:\.[A-Z])?",issuer):
+                            return [], None
+                        items=[]
+                        for tx in transactions:
+                            if parser == "etree":
+                                code=text(tx,'.//transactionCoding/transactionCode')
+                                shares_text=text(tx,'.//transactionAmounts/transactionShares/value')
+                                price_text=text(tx,'.//transactionAmounts/transactionPricePerShare/value')
+                            else:
+                                code=node_text(tx, 'transactioncode')
+                                shares_node=tx.find('transactionshares')
+                                price_node=tx.find('transactionpricepershare')
+                                shares_text=node_text(shares_node, 'value') if shares_node is not None else None
+                                price_text=node_text(price_node, 'value') if price_node is not None else None
+                            if code not in ('P','S'): continue
+                            try: shares=float(shares_text)
+                            except (TypeError,ValueError): shares=None
+                            try: price=float(price_text)
+                            except (TypeError,ValueError): price=None
+                            items.append({"id":hashlib.sha256((issuer+accession+str(len(items))).encode()).hexdigest()[:20],"ticker":issuer,"company":company,"insider_name":owner_name or 'Unavailable in filing',"role":role,"action":'buy' if code=='P' else 'sell',"shares":shares,"dollar_value":shares*price if shares is not None and price is not None else None,"filing_date":filed,"source_url":archive,"feed_mode":"live"})
+                        return items, None
+                    return [], None
+
+            results=await asyncio.gather(*(one_ticker(t) for t in wanted))
+            items=[]
+            failures=[]
+            for ticker_items,error in results:
+                items.extend(ticker_items)
+                if error:
+                    failures.append(error)
             if items:
-                return FeedResult(items)
+                return FeedResult(items, "SEC partial failures: " + "; ".join(failures[:3]) if failures else None)
             if failures:
                 return FeedResult([], "SEC upstream unavailable: " + "; ".join(failures[:3]))
             return FeedResult([])

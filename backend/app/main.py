@@ -18,7 +18,7 @@ from .models import MoneyMatch
 client = AsyncIOMotorClient(settings.mongodb_url)
 db = client[settings.mongodb_db]
 
-BUILD_VERSION = "v9-clean-runtime"
+BUILD_VERSION = "v10-sec-parallel-runtime"
 BASELINE = [x.strip().upper() for x in settings.baseline_tickers.split(',') if x.strip()]
 sync_lock = asyncio.Lock()
 

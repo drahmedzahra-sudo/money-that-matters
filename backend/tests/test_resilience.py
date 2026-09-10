@@ -50,7 +50,7 @@ def test_v7_source_integrity_files_are_present():
     main=(root/'app'/'main.py').read_text()
     house=(root/'app'/'feeds'/'house.py').read_text()
     sec=(root/'app'/'feeds'/'sec.py').read_text()
-    assert 'v9-clean-runtime' in main
+    assert 'v10-sec-parallel-runtime' in main
     assert 'txt_name' in house and 'FD.zip' in house
     assert 'company_tickers' in sec and 'https://www.sec.gov/files/company_tickers.json' not in sec
 
