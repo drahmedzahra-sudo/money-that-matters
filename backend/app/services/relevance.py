@@ -8,7 +8,8 @@ EGYPT_ALLOWED = {
 }
 
 MARKET_ANCHORS = ["s&p", "nasdaq", "dow jones", "dow", "sector", "central bank", "interest rate", "rates", "tariff", "trade decision", "earnings", "guidance", "forecast"]
-EGYPT_NATIVE_ANCHORS = ["اقتصاد", "بنوك", "أسهم", "البورصة", "الجنيه", "تضخم", "فائدة", "مصر", "egx", "بنك مركزي", "سوق المال"]
+EGYPT_NATIVE_ANCHORS = ["اقتصاد", "بنوك", "أسهم", "البورصة", "الجنيه", "تضخم", "فائدة", "مصر", "egx", "بنك مركزي", "سوق المال", "استثمار", "شركة", "شركات", "تمويل", "أرباح", "إيرادات", "سندات", "صندوق", "طاقة", "بترول", "غاز", "صناعة", "تصنيع", "تداول", "أسعار"]
+EGYPT_MARKET_ANCHORS = ["stock", "stocks", "share", "shares", "market", "markets", "company", "companies", "investment", "invest", "bank", "banks", "economy", "business", "finance", "financial", "earnings", "profit", "profits", "revenue", "ipo", "egx", "fra", "cbe", "bond", "bonds", "fund", "funds", "capital", "oil", "gas", "energy", "industrial", "manufacturing", "inflation", "currency", "pound", "dollar", "listing", "listed", "trading", "liquidity", "interest rate", "interest rates"]
 
 
 def host_allowed(url: str, allowed: set[str]) -> bool:
@@ -30,9 +31,9 @@ def market_subject_ok(text: str, ticker: str | None = None, company: str | None 
 
 def egypt_subject_ok(text: str, native: bool = False) -> bool:
     hay = text.lower()
-    if "egypt" in hay or "egx" in hay or "مصر" in text or "البورصة" in text:
-        return True
-    return native and any(x in text for x in EGYPT_NATIVE_ANCHORS)
+    market_signal = any(x in hay for x in EGYPT_MARKET_ANCHORS) or any(x in text for x in EGYPT_NATIVE_ANCHORS)
+    egypt_signal = "egypt" in hay or "egx" in hay or "مصر" in text or "البورصة" in text
+    return bool(egypt_signal and market_signal)
 
 
 def _whole_word(token: str, text: str) -> bool:

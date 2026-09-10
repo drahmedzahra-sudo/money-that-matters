@@ -214,18 +214,46 @@ class EgyptEGXFeed(Feed):
             return FeedResult([],f"EGX: {exc}")
 
 class EgyptDirectFeed(Feed):
-    """Direct, read-only Egypt business/news pages used when GDELT is unavailable."""
+    """Direct Egypt business/markets news with article-level date verification."""
     URLS = [
         "https://english.ahram.org.eg/Category/3/14/Business/Markets--Companies.aspx",
     ]
     def __init__(self, name="egypt_news"): self.name=name
 
+    @staticmethod
+    def _article_date(html: str):
+        import bs4
+        soup=bs4.BeautifulSoup(html,"html.parser")
+        for selector, attr in [
+            ("meta[property='article:published_time']", "content"),
+            ("meta[name='date']", "content"),
+            ("meta[name='publishdate']", "content"),
+        ]:
+            node=soup.select_one(selector)
+            if node and node.get(attr):
+                try: return parse_date(node.get(attr)).isoformat()
+                except Exception: pass
+        text=" ".join(soup.stripped_strings)
+        patterns=[
+            r"Ahram Online\s*,?\s*\w+\s+(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+20\d{2})",
+            r"Published\s+(\w+\s+\d{1,2},\s+20\d{2})",
+            r"(\d{1,2}/\d{1,2}/20\d{2})",
+        ]
+        for pat in patterns:
+            m=_re.search(pat,text,_re.I)
+            if m:
+                raw=m.group(1)
+                for fmt in ("%d %b %Y","%B %d, %Y","%m/%d/%Y"):
+                    try: return dtmod.datetime.strptime(raw,fmt).replace(tzinfo=dtmod.timezone.utc).isoformat()
+                    except ValueError: pass
+        return None
+
     async def fetch(self, tickers=None):
         import bs4
-        items=[]
         headers={"User-Agent":"Money that matters/1.0"}
         try:
-            async with httpx.AsyncClient(timeout=30, follow_redirects=True, headers=headers) as client:
+            async with httpx.AsyncClient(timeout=20, follow_redirects=True, headers=headers) as client:
+                candidates=[]
                 for url in self.URLS:
                     try:
                         r=await client.get(url); r.raise_for_status()
@@ -237,21 +265,28 @@ class EgyptDirectFeed(Feed):
                         title=" ".join(a.get_text(" ", strip=True).split())
                         href=a.get("href","")
                         if len(title)<20 or len(title)>240 or href in seen: continue
-                        if not any(k in title.lower() for k in ["egypt","egx","stocks","market","company","investment","economy","bank","oil","energy","business","shares"]): continue
                         link=httpx.URL(url).join(href)
                         if not host_allowed(str(link), EGYPT_ALLOWED): continue
                         if not egypt_subject_ok(title, native=False): continue
                         seen.add(href)
-                        raw_text=" ".join(a.parent.get_text(" ", strip=True).split())
-                        m=_re.search(r"\b(?:0?[1-9]|[12]\d|3[01])/[01]?\d/20\d{2}\b", raw_text)
-                        published=None
-                        if m:
-                            try: published=parse_date(m.group(0)).isoformat()
-                            except Exception: published=None
-                        items.append({"id":hashlib.sha256(str(link).encode()).hexdigest()[:20],"ticker":None,"company":None,"headline":title,"outlet":(urlparse(str(link)).hostname or "").removeprefix("www."),"published_at":published,"source_url":str(link),"lean":classify(title)})
-                        if len(items)>=30: break
-                    if len(items)>=30: break
-            if not items: return FeedResult([], "Egypt direct sources returned no verified records")
-            return FeedResult(list({x["id"]:x for x in items}.values()))
+                        candidates.append((str(link),title))
+                        if len(candidates)>=25: break
+                    if len(candidates)>=25: break
+
+                sem=asyncio.Semaphore(5)
+                async def verify(link,title):
+                    async with sem:
+                        try:
+                            rr=await client.get(link)
+                            rr.raise_for_status()
+                            published=self._article_date(rr.text)
+                            if not published: return None
+                            return {"id":hashlib.sha256(link.encode()).hexdigest()[:20],"ticker":None,"company":None,"headline":title,"outlet":(urlparse(link).hostname or "").removeprefix("www."),"published_at":published,"source_url":link,"lean":classify(title)}
+                        except Exception:
+                            return None
+                verified=await asyncio.gather(*(verify(l,t) for l,t in candidates))
+                items=[x for x in verified if x]
+                if not items: return FeedResult([], "Egypt direct sources returned no verified records")
+                return FeedResult(list({x["id"]:x for x in items}.values()))
         except Exception as exc:
             return FeedResult([], f"Egypt direct: {exc}")
